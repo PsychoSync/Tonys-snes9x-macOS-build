@@ -25,6 +25,8 @@
 
 @interface S9xEmulationPreferencesViewController ()
 
+@property (nonatomic, strong) id defaultsObserver;
+
 @end
 
 @implementation S9xEmulationPreferencesViewController
@@ -44,12 +46,14 @@
 {
 	[super viewWillAppear];
 
-	[NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification
+    __weak S9xEmulationPreferencesViewController *weakSelf = self;
+	self.defaultsObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification
 													object:NSUserDefaults.standardUserDefaults
 													 queue:NSOperationQueue.mainQueue
 												usingBlock:^(NSNotification *notification)
 	{
-		[((AppDelegate *)NSApp.delegate) applyEmulationSettings];
+        if (weakSelf != nil)
+            [((AppDelegate *)NSApp.delegate) applyEmulationSettings];
 	}];
 }
 
@@ -57,7 +61,14 @@
 {
 	[super viewDidDisappear];
 
-	[NSNotificationCenter.defaultCenter removeObserver:self];
+	[NSNotificationCenter.defaultCenter removeObserver:self.defaultsObserver];
+    self.defaultsObserver = nil;
+}
+
+- (void)dealloc
+{
+    if (self.defaultsObserver != nil)
+        [NSNotificationCenter.defaultCenter removeObserver:self.defaultsObserver];
 }
 
 - (IBAction)resetDefaults:(id)sender

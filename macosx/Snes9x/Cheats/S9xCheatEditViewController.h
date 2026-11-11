@@ -23,10 +23,11 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class S9xCheatItem;
+@class S9xEngine;
 
 @interface S9xCheatEditViewController : NSViewController
 
-- (instancetype)initWithCheatItem:(nullable S9xCheatItem *)cheatItem saveCallback:(void (^)(void))saveCallback;
+- (instancetype)initWithEngine:(S9xEngine *)engine cheatItem:(nullable S9xCheatItem *)cheatItem saveCallback:(void (^)(void))saveCallback;
 
 - (void)updateSaveButton;
 

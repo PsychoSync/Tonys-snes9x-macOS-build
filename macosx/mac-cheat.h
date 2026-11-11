@@ -24,8 +24,11 @@
 
 #import <Foundation/Foundation.h>
 
+@class S9xEngine;
+
 @interface S9xCheatItem : NSView
 @property (nonatomic, assign) uint32	cheatID;
+@property (nonatomic, readonly) NSUInteger romGeneration;
 @property (nonatomic, strong) NSNumber	*address;
 @property (nonatomic, strong) NSNumber	*value;
 @property (nonatomic, strong) NSNumber	*enabled;
@@ -40,7 +43,8 @@ extern "C" {
 bool CheatValuesFromCode(NSString *code, uint32 *address, uint8 *value);
 void CreateCheatFromAddress(NSNumber *address, NSNumber *value, NSString *cheatDescription);
 void CreateCheatFromCode(NSString *code, NSString *cheatDescription);
-NSArray<S9xCheatItem *> *GetAllCheats(void);
+// Call while emulation is suspended; returned items contain UI-safe snapshots.
+NSArray<S9xCheatItem *> *GetAllCheats(S9xEngine *engine);
 #ifdef __cplusplus
 }
 #endif

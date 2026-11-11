@@ -201,6 +201,8 @@ extern id<S9xInputDelegate> inputDelegate;
 @property (nonatomic, weak) id<S9xEmulationDelegate> emulationDelegate;
 
 @property (nonatomic, assign) BOOL cheatsEnabled;
+@property (nonatomic, assign, getter=isAudioMuted) BOOL audioMuted;
+@property (nonatomic, readonly) NSUInteger romGeneration;
 
 - (void)recreateS9xView;
 
@@ -214,6 +216,15 @@ extern id<S9xInputDelegate> inputDelegate;
 - (void)pause;
 - (void)quit;
 - (void)resume;
+- (void)togglePause;
+
+// Completion runs asynchronously on the main thread once core state is idle.
+// Each begin must be paired with an end, including overlapping editor windows.
+- (void)beginUserInterfacePause:(dispatch_block_t)completion;
+- (void)endUserInterfacePause;
+- (BOOL)isPausedForUserInterface;
+- (void)performWithEmulationPaused:(dispatch_block_t)action;
+- (void)performForROMGeneration:(NSUInteger)generation action:(dispatch_block_t)action;
 
 - (BOOL)setButton:(S9xButtonCode)button forKey:(int16)key player:(int8)player oldButton:(S9xButtonCode *)oldButton oldPlayer:(int8 *)oldPlayer oldKey:(int16 *)oldKey;
 - (void)clearButton:(S9xButtonCode)button forPlayer:(int8)player;
@@ -246,8 +257,10 @@ extern id<S9xInputDelegate> inputDelegate;
 - (void)setDisableSpriteLimit:(BOOL)flag;
 
 - (void)copyRAM:(uint8_t *)buffer length:(size_t)length;
+- (void)readRAMWithCompletion:(void (^)(NSData *ram))completion;
 
 - (NSArray<S9xWatchPoint *> *)getWatchPoints;
+- (void)readWatchPointsWithCompletion:(void (^)(NSArray<S9xWatchPoint *> *watchPoints))completion;
 - (void)setWatchPoints:(NSArray<S9xWatchPoint *> *)watchPoints;
 
 @end

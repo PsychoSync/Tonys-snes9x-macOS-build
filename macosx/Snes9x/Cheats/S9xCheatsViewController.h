@@ -22,7 +22,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class S9xEngine;
+
 @interface S9xCheatsViewController : NSViewController
+@property (nonatomic, strong) S9xEngine *engine;
 - (void)deselectAll;
 - (void)reloadData;
 @end

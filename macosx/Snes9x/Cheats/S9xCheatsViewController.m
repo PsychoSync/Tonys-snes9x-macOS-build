@@ -52,6 +52,7 @@
 - (void)viewWillAppear
 {
 	[super viewWillAppear];
+    [self reloadData];
 	[self.tableView sizeLastColumnToFit];
 }
 
@@ -62,11 +63,21 @@
 
 - (void)reloadData
 {
+    [self.engine beginUserInterfacePause:^
+    {
+        NSArray<S9xCheatItem *> *cheats = GetAllCheats(self.engine);
+        [self.engine endUserInterfacePause];
+        [self displayCheats:cheats];
+    }];
+}
+
+- (void)displayCheats:(NSArray<S9xCheatItem *> *)cheats
+{
 	NSSet<NSNumber *> *selectedIDs = [NSSet setWithArray:[[self.cheats objectsAtIndexes:self.tableView.selectedRowIndexes] valueForKey:@"cheatID"]];
 
 	CGPoint scrollPosition = self.tableView.visibleRect.origin;
 
-	self.cheats = [GetAllCheats() sortedArrayUsingDescriptors:self.tableView.sortDescriptors];
+	self.cheats = [cheats sortedArrayUsingDescriptors:self.tableView.sortDescriptors];
 	[self.tableView reloadData];
 
 	NSMutableIndexSet *indexSet = [NSMutableIndexSet new];
@@ -126,7 +137,7 @@
 
 - (void)addNewCheat
 {
-	S9xCheatEditViewController *vc = [[S9xCheatEditViewController alloc] initWithCheatItem:nil saveCallback:^
+	S9xCheatEditViewController *vc = [[S9xCheatEditViewController alloc] initWithEngine:self.engine cheatItem:nil saveCallback:^
 	{
 		[self reloadData];
 	}];
@@ -150,6 +161,8 @@
 	}
 
 	[self.tableView deselectAll:self];
+    self.cheats = @[];
+    [self.tableView reloadData];
 	[self reloadData];
 }
 
@@ -161,7 +174,7 @@
 	{
 		S9xCheatItem *item = self.cheats[selectedRows.firstIndex];
 
-		S9xCheatEditViewController *vc = [[S9xCheatEditViewController alloc] initWithCheatItem:item saveCallback:^
+		S9xCheatEditViewController *vc = [[S9xCheatEditViewController alloc] initWithEngine:self.engine cheatItem:item saveCallback:^
 		{
 			[self reloadData];
 		}];

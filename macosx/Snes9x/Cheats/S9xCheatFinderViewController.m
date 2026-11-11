@@ -117,7 +117,6 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 	NSNumberFormatter *_signedFormatter;
 	NSNumberFormatter *_hexFormatter;
 
-	BOOL _shouldReopen;
 }
 
 - (void)viewDidLoad
@@ -168,8 +167,9 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 {
 	[super viewWillAppear];
 	[self updateScrollBar];
-	[self.engine copyRAM:(uint8_t *)_currentRAM length:sizeof(_currentRAM)];
-	[self reloadData];
+    [self refreshRAMWithCompletion:^{
+        [self reloadData];
+    }];
 	[self reloadWatchPoints];
 }
 
@@ -199,14 +199,23 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 
 	_hasStored = NO;
 	_hasPrevious = NO;
-	_shouldReopen = NO;
 
 	self.engine.emulationDelegate = self;
-	[self.engine copyRAM:(uint8_t *)_currentRAM length:sizeof(_currentRAM)];
 
 	[self.engine setWatchPoints:@[]];
 
-	[self reset:self];
+    [self refreshRAMWithCompletion:^{
+        [self reset:self];
+    }];
+}
+
+- (void)refreshRAMWithCompletion:(dispatch_block_t)completion
+{
+    [self.engine readRAMWithCompletion:^(NSData *ram)
+    {
+        [ram getBytes:self->_currentRAM length:sizeof(self->_currentRAM)];
+        completion();
+    }];
 }
 
 - (void)copyPrevious
@@ -252,8 +261,12 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 
 - (void)reloadWatchPoints
 {
-	_watchRows = [[self.engine getWatchPoints] mutableCopy];
-	[self.watchTableView reloadData];
+    [self.engine readWatchPointsWithCompletion:^(NSArray<S9xWatchPoint *> *watchPoints)
+    {
+        self->_watchRows = [watchPoints mutableCopy];
+        [self.watchTableView reloadData];
+        [self updateWatchButtons];
+    }];
 }
 
 - (uint32_t)copyValueFrom:(uint8_t *)buffer index:(NSUInteger)index
@@ -391,12 +404,15 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 
 - (IBAction)storeValues:(id)sender
 {
-	memcpy(_storedRAM, _currentRAM, MAIN_MEMORY_SIZE);
-	_hasStored = YES;
-	((NSButton *)[self.view viewWithTag:S9xCheatFinderCompareToStored]).enabled = YES;
+    [self refreshRAMWithCompletion:^
+    {
+        memcpy(self->_storedRAM, self->_currentRAM, MAIN_MEMORY_SIZE);
+        self->_hasStored = YES;
+        ((NSButton *)[self.view viewWithTag:S9xCheatFinderCompareToStored]).enabled = YES;
 
-	[self reloadData];
-	[self updateSearchButton];
+        [self reloadData];
+        [self updateSearchButton];
+    }];
 }
 
 - (IBAction)reset:(id)sender
@@ -414,6 +430,14 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 }
 
 - (IBAction)search:(id)sender
+{
+    [self copyPrevious];
+    [self refreshRAMWithCompletion:^{
+        [self searchCurrentSnapshot];
+    }];
+}
+
+- (void)searchCurrentSnapshot
 {
 	NSMutableIndexSet *rowsToRemove = [NSMutableIndexSet new];
 	NSNumber *customValue = self.customValue;
@@ -540,7 +564,10 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 
 - (IBAction)reload:(id)sender
 {
-	[self reloadData];
+    [self copyPrevious];
+    [self refreshRAMWithCompletion:^{
+        [self reloadData];
+    }];
 }
 
 - (IBAction)setFormat:(id)sender
@@ -579,7 +606,7 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 {
 	S9xCheatFinderEntry *entry = _addressRows[self.addressTableView.selectedRow];
 
-	S9xCheatEditViewController *vc = [[S9xCheatEditViewController alloc] initWithCheatItem:nil saveCallback:^
+	S9xCheatEditViewController *vc = [[S9xCheatEditViewController alloc] initWithEngine:self.engine cheatItem:nil saveCallback:^
 	{
 		[self.delegate addedCheat];
 	}];
@@ -716,35 +743,26 @@ typedef NS_ENUM(uint32_t, S9xCheatFinderWatchSegments) {
 {
 	if (!NSThread.isMainThread)
 	{
-		dispatch_sync(dispatch_get_main_queue(), ^
+		dispatch_async(dispatch_get_main_queue(), ^
 		{
 			[self emulationPaused];
 		});
 	}
-	else if (_shouldReopen)
-	{
-		[self.view.window makeKeyAndOrderFront:self];
-		_shouldReopen = NO;
-	}
+    else if (self.view.window.isVisible)
+        [self refreshRAMWithCompletion:^{ [self reloadData]; }];
 }
 
 - (void)emulationResumed
 {
 	if (!NSThread.isMainThread)
 	{
-		dispatch_sync(dispatch_get_main_queue(), ^
+		dispatch_async(dispatch_get_main_queue(), ^
 		{
 			[self emulationResumed];
 		});
 	}
 	else
 	{
-		if ([self.view.window isVisible])
-		{
-			[self.view.window close];
-			_shouldReopen = YES;
-		}
-
 		[self reloadData];
 	}
 }

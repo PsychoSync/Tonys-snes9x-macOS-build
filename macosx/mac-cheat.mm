@@ -45,76 +45,107 @@ extern SCheatData	Cheat;
 bool S9xGameGenieToRaw(const std::string &code, uint32 &address, uint8 &byte);
 bool S9xProActionReplayToRaw(const std::string &code, uint32 &address, uint8 &byte);
 
-@implementation S9xCheatItem
-
-- (void)setAddress:(uint32)address value:(uint8)value cheatDescription:(const char *)cheatDescription
+static bool ValidateCheatID(uint32 cheatID)
 {
-	bool enabled = self.enabled.boolValue;
+    if (cheatID < Cheat.group.size())
+        return true;
 
-	char code[256];
-	sprintf(code, "%x=%x", address, value);
-	S9xModifyCheatGroup(self.cheatID, cheatDescription, code);
-
-	if (enabled)
-	{
-		S9xEnableCheatGroup(self.cheatID);
-	}
+    [NSApp presentError:[NSError errorWithDomain:@"com.snes9x" code:2 userInfo:@{
+        NSLocalizedDescriptionKey: NSLocalizedString(@"This cheat is no longer available. Refresh the cheat list and try again.", nil)
+    }]];
+    return false;
 }
 
-@dynamic address;
-- (NSNumber *)address
+@interface S9xCheatItem ()
+@property (nonatomic, weak) S9xEngine *engine;
+- (instancetype)initWithCheatID:(uint32)cheatID engine:(S9xEngine *)engine;
+@end
+
+@implementation S9xCheatItem
+
+@synthesize address = _address;
+@synthesize value = _value;
+@synthesize enabled = _enabled;
+@synthesize cheatDescription = _cheatDescription;
+
+- (instancetype)initWithCheatID:(uint32)cheatID engine:(S9xEngine *)engine
 {
-	return @(Cheat.group[self.cheatID].cheat[0].address);
+    if ((self = [super init]))
+    {
+        _cheatID = cheatID;
+        _engine = engine;
+        _romGeneration = engine.romGeneration;
+        const auto &group = Cheat.group[cheatID];
+        _address = @(group.cheat[0].address);
+        _value = @(group.cheat[0].byte);
+        _enabled = @(group.enabled);
+        _cheatDescription = [NSString stringWithUTF8String:group.name.c_str()];
+    }
+    return self;
+}
+
+- (void)applySnapshot
+{
+    uint32 cheatID = self.cheatID;
+    uint32 address = self.address.unsignedIntValue;
+    uint8 value = self.value.unsignedCharValue;
+    BOOL enabled = self.enabled.boolValue;
+    NSString *description = self.cheatDescription;
+    [self.engine performForROMGeneration:self.romGeneration action:^
+    {
+        if (!ValidateCheatID(cheatID))
+            return;
+        char code[32];
+        snprintf(code, sizeof(code), "%x=%x", address, value);
+        S9xModifyCheatGroup(cheatID, description.UTF8String, code);
+
+        if (enabled)
+            S9xEnableCheatGroup(cheatID);
+    }];
 }
 
 - (void)setAddress:(NSNumber *)address
 {
-	[self setAddress:address.unsignedIntValue value:Cheat.group[self.cheatID].cheat[0].byte cheatDescription:self.cheatDescription.UTF8String];
-}
-
-@dynamic value;
-- (NSNumber *)value
-{
-	return @(Cheat.group[self.cheatID].cheat[0].byte);
+    _address = address;
+    [self applySnapshot];
 }
 
 - (void)setValue:(NSNumber *)value
 {
-	[self setAddress:Cheat.group[self.cheatID].cheat[0].address value:value.unsignedCharValue cheatDescription:self.cheatDescription.UTF8String];
-}
-
-@dynamic enabled;
-- (NSNumber *)enabled
-{
-	return @(Cheat.group[self.cheatID].enabled);
+    _value = value;
+    [self applySnapshot];
 }
 
 - (void)setEnabled:(NSNumber *)enabled
 {
-	if (enabled.boolValue)
-	{
-		S9xEnableCheatGroup(self.cheatID);
-	}
-	else
-	{
-		S9xDisableCheatGroup(self.cheatID);
-	}
-}
-
-@dynamic cheatDescription;
-- (NSString *)cheatDescription
-{
-	return [NSString stringWithUTF8String:Cheat.group[self.cheatID].name.c_str()];
+    _enabled = enabled;
+    uint32 cheatID = self.cheatID;
+    [self.engine performForROMGeneration:self.romGeneration action:^
+    {
+        if (!ValidateCheatID(cheatID))
+            return;
+        if (enabled.boolValue)
+            S9xEnableCheatGroup(cheatID);
+        else
+            S9xDisableCheatGroup(cheatID);
+    }];
 }
 
 - (void)setCheatDescription:(NSString *)cheatDescription
 {
-	[self setAddress:Cheat.group[self.cheatID].cheat[0].address value:Cheat.group[self.cheatID].cheat[0].byte cheatDescription:cheatDescription.UTF8String];
+    _cheatDescription = [cheatDescription copy];
+    [self applySnapshot];
 }
 
 - (void)delete
 {
-	S9xDeleteCheatGroup(self.cheatID);
+    uint32 cheatID = self.cheatID;
+    [self.engine performForROMGeneration:self.romGeneration action:^
+    {
+        if (!ValidateCheatID(cheatID))
+            return;
+        S9xDeleteCheatGroup(cheatID);
+    }];
 }
 
 @end
@@ -163,17 +194,16 @@ void CreateCheatFromCode(NSString *code, NSString *cheatDescription)
 	S9xEnableCheatGroup(Cheat.group.size() - 1);
 }
 
-NSArray<S9xCheatItem *> *GetAllCheats(void)
+NSArray<S9xCheatItem *> *GetAllCheats(S9xEngine *engine)
 {
 	NSMutableArray *cheats = [NSMutableArray new];
 	uint32 cheatID = 0;
 
-	for (auto it : Cheat.group)
+	for (const auto &group : Cheat.group)
 	{
-		S9xCheatItem *cheat    = [S9xCheatItem new];
-		cheat.cheatID		   = cheatID++;
-
-		[cheats addObject:cheat];
+        if (!group.cheat.empty())
+            [cheats addObject:[[S9xCheatItem alloc] initWithCheatID:cheatID engine:engine]];
+        ++cheatID;
 	}
 
 	return cheats;

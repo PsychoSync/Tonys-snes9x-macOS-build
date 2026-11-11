@@ -43,6 +43,8 @@
 #endif
 
 #import <pthread.h>
+#include <condition_variable>
+#include <mutex>
 
 #import "mac-prefix.h"
 #import "mac-audio.h"
@@ -304,6 +306,48 @@ static void UpdateFreezeDefrostScreen (int, CGImageRef, uint8 *, CGContextRef);
 static void * MacSnes9xThread (void *);
 static inline void EmulationLoop (void);
 
+static std::mutex userInterfacePauseMutex;
+static std::condition_variable emulationThreadStopped;
+static std::condition_variable userInterfacePauseChanged;
+static NSUInteger userInterfacePauseCount = 0;
+static bool userInterfacePauseAcknowledged = false;
+static bool emulationThreadActive = false;
+static NSMutableArray<dispatch_block_t> *userInterfacePauseCompletions;
+
+static bool ServiceUserInterfacePause(bool threadStopped = false)
+{
+    {
+        std::lock_guard<std::mutex> lock(userInterfacePauseMutex);
+        if (threadStopped)
+            emulationThreadActive = false;
+        if (userInterfacePauseCount == 0)
+        {
+            // Only the worker can revoke the guarantee that core state is idle.
+            userInterfacePauseAcknowledged = false;
+            return false;
+        }
+
+        userInterfacePauseAcknowledged = true;
+        for (dispatch_block_t completion in userInterfacePauseCompletions)
+            dispatch_async(dispatch_get_main_queue(), completion);
+        [userInterfacePauseCompletions removeAllObjects];
+    }
+
+    if (!threadStopped)
+    {
+        std::unique_lock<std::mutex> lock(userInterfacePauseMutex);
+        userInterfacePauseChanged.wait(lock, [] { return userInterfacePauseCount == 0 || !running; });
+    }
+
+    return true;
+}
+
+static bool UserInterfacePauseRequested(void)
+{
+    std::lock_guard<std::mutex> lock(userInterfacePauseMutex);
+    return userInterfacePauseCount > 0;
+}
+
 int main (int argc, const char *argv[])
 {
     return NSApplicationMain(argc, argv);
@@ -318,6 +362,8 @@ static void * MacSnes9xThread (void *)
 
     s9xthreadrunning = false;
     Settings.StopEmulation = true;
+    ServiceUserInterfacePause(true);
+    emulationThreadStopped.notify_all();
 
     return (NULL);
 }
@@ -332,17 +378,14 @@ void CopyPressedKeys(bool8 keys[MAC_MAX_PLAYERS][kNumButtons], bool8 gamepadButt
 
 static inline void EmulationLoop (void)
 {
+    while (running && ServiceUserInterfacePause())
+    {
+    }
+    if (!running)
+        return;
+
     bool8    olddisplayframerate = false;
     int        storedMacFrameSkip  = macFrameSkip;
-
-	if (pauseEmulation)
-	{
-		[s9xView.emulationDelegate emulationResumed];
-	}
-
-    pauseEmulation = false;
-    frameAdvance   = false;
-	[s9xView updatePauseOverlay];
 
     if (macQTRecord)
     {
@@ -389,6 +432,9 @@ static inline void EmulationLoop (void)
     {
         while (running)
         {
+            if (ServiceUserInterfacePause())
+                continue;
+
             ProcessInput();
 
             if (!pauseEmulation)
@@ -2808,7 +2854,24 @@ void QuitWithFatalError ( NSString *message)
 
 - (void)viewWillMoveToWindow:(NSWindow *)newWindow
 {
+    [NSNotificationCenter.defaultCenter removeObserver:self name:NSWindowDidResignKeyNotification object:self.window];
+    if (newWindow != nil)
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(windowDidResignKey:) name:NSWindowDidResignKeyNotification object:newWindow];
 	newWindow.acceptsMouseMovedEvents = YES;
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification
+{
+    pthread_mutex_lock(&keyLock);
+    memset(pressedKeys, 0, sizeof(pressedKeys));
+    memset(pressedRawKeyboardButtons, 0, sizeof(pressedRawKeyboardButtons));
+    memset(pressedFunctionButtons, 0, sizeof(pressedFunctionButtons));
+    pthread_mutex_unlock(&keyLock);
+}
+
+- (void)dealloc
+{
+    [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
 - (void)keyDown:(NSEvent *)event
@@ -2929,10 +2992,7 @@ void QuitWithFatalError ( NSString *message)
 	}
 	else
 	{
-		pauseEmulation = true;
-		[self.emulationDelegate emulationPaused];
-
-		[s9xView updatePauseOverlay];
+        [NSApp sendAction:@selector(resume:) to:nil from:self];
 	}
 }
 
@@ -3054,12 +3114,13 @@ void QuitWithFatalError ( NSString *message)
 - (void)updatePauseOverlay
 {
 	dispatch_async(dispatch_get_main_queue(), ^{
-		self.subviews[0].hidden = (frzselecting || !pauseEmulation);
+        BOOL paused = pauseEmulation || UserInterfacePauseRequested();
+		self.subviews[0].hidden = (frzselecting || !paused);
 		CGFloat scaleFactor = MAX(self.window.backingScaleFactor, 1.0);
 		glScreenW = self.frame.size.width * scaleFactor;
 		glScreenH = self.frame.size.height * scaleFactor;
 
-		BOOL showMouse = !useMouse || !running || pauseEmulation;
+		BOOL showMouse = !useMouse || !running || paused;
 		CGAssociateMouseAndMouseCursorPosition(showMouse);
 
 		if (showMouse)
@@ -3095,11 +3156,6 @@ void QuitWithFatalError ( NSString *message)
 - (BOOL)canBecomeKeyView
 {
     return YES;
-}
-
-- (BOOL)validateMenuItem:(NSMenuItem *)menuItem
-{
-    return !( running && !pauseEmulation);
 }
 
 @end
@@ -3140,6 +3196,18 @@ void QuitWithFatalError ( NSString *message)
 
 - (void)start
 {
+    {
+        std::lock_guard<std::mutex> lock(userInterfacePauseMutex);
+        emulationThreadActive = true;
+        userInterfacePauseAcknowledged = false;
+    }
+    Settings.StopEmulation = false;
+    if (pauseEmulation)
+        [s9xView.emulationDelegate emulationResumed];
+    pauseEmulation = false;
+    frameAdvance = false;
+    [s9xView updatePauseOverlay];
+
 #ifdef DEBUGGER
 	CPU.Flags |= DEBUG_MODE_FLAG;
 	S9xDoDebug();
@@ -3162,7 +3230,7 @@ void QuitWithFatalError ( NSString *message)
 
 - (void)stop
 {
-	SNES9X_Quit();
+    [self quit];
     S9xExit();
 }
 
@@ -3170,7 +3238,6 @@ void QuitWithFatalError ( NSString *message)
 {
 	SNES9X_SoftReset();
 	SNES9X_Go();
-	[self resume];
 }
 
 
@@ -3178,7 +3245,6 @@ void QuitWithFatalError ( NSString *message)
 {
 	SNES9X_Reset();
 	SNES9X_Go();
-	[self resume];
 }
 
 - (BOOL)isRunning
@@ -3188,7 +3254,97 @@ void QuitWithFatalError ( NSString *message)
 
 - (BOOL)isPaused
 {
-    return running && pauseEmulation;
+    return running && (pauseEmulation || UserInterfacePauseRequested());
+}
+
+- (BOOL)isPausedForUserInterface
+{
+    return UserInterfacePauseRequested();
+}
+
+- (void)togglePause
+{
+    [self performWithEmulationPaused:^
+    {
+        if (!running)
+            return;
+        if (pauseEmulation)
+            [self resume];
+        else
+            [self pause];
+    }];
+}
+
+- (BOOL)isAudioMuted
+{
+    return MacIsAudioMuted();
+}
+
+- (void)setAudioMuted:(BOOL)audioMuted
+{
+    MacSetAudioMuted(audioMuted);
+}
+
+- (void)beginUserInterfacePause:(dispatch_block_t)completion
+{
+    NSAssert(NSThread.isMainThread, @"UI pauses must be requested on the main thread");
+    {
+        std::lock_guard<std::mutex> lock(userInterfacePauseMutex);
+        ++userInterfacePauseCount;
+        if (userInterfacePauseAcknowledged || !emulationThreadActive)
+            dispatch_async(dispatch_get_main_queue(), completion);
+        else
+        {
+            if (userInterfacePauseCompletions == nil)
+                userInterfacePauseCompletions = [NSMutableArray new];
+            [userInterfacePauseCompletions addObject:[completion copy]];
+        }
+    }
+
+}
+
+- (void)endUserInterfacePause
+{
+    NSAssert(NSThread.isMainThread, @"UI pauses must be released on the main thread");
+    {
+        std::lock_guard<std::mutex> lock(userInterfacePauseMutex);
+        NSAssert(userInterfacePauseCount > 0, @"Unbalanced UI pause");
+        --userInterfacePauseCount;
+    }
+    userInterfacePauseChanged.notify_all();
+    [s9xView updatePauseOverlay];
+}
+
+- (void)performWithEmulationPaused:(dispatch_block_t)action
+{
+    [self beginUserInterfacePause:^
+    {
+        @try
+        {
+            action();
+        }
+        @finally
+        {
+            [self endUserInterfacePause];
+        }
+    }];
+}
+
+- (void)performForROMGeneration:(NSUInteger)generation action:(dispatch_block_t)action
+{
+    [self performWithEmulationPaused:^
+    {
+        if (self.romGeneration != generation)
+        {
+            NSError *error = [NSError errorWithDomain:@"com.snes9x" code:1 userInfo:@{
+                NSLocalizedDescriptionKey: NSLocalizedString(@"The game changed before this operation could be applied.", nil),
+                NSLocalizedRecoverySuggestionErrorKey: NSLocalizedString(@"Reopen the editor and try again.", nil)
+            }];
+            [NSApp presentError:error];
+            return;
+        }
+        action();
+    }];
 }
 
 - (void)pause
@@ -3200,8 +3356,31 @@ void QuitWithFatalError ( NSString *message)
 
 - (void)quit
 {
+    if (running)
+        ++_romGeneration;
+    [self stopEmulationThread];
 	SNES9X_Quit();
 	[self pause];
+}
+
+- (void)stopEmulationThread
+{
+    {
+        std::lock_guard<std::mutex> lock(userInterfacePauseMutex);
+        running = false;
+    }
+    frzselecting = false;
+    userInterfacePauseChanged.notify_all();
+
+    pthread_mutex_lock(&keyLock);
+    memset(pressedKeys, 0, sizeof(pressedKeys));
+    memset(pressedGamepadButtons, 0, sizeof(pressedGamepadButtons));
+    memset(pressedRawKeyboardButtons, 0, sizeof(pressedRawKeyboardButtons));
+    memset(pressedFunctionButtons, 0, sizeof(pressedFunctionButtons));
+    pthread_mutex_unlock(&keyLock);
+
+    std::unique_lock<std::mutex> lock(userInterfacePauseMutex);
+    emulationThreadStopped.wait(lock, [] { return !emulationThreadActive; });
 }
 
 - (void)resume
@@ -3324,13 +3503,8 @@ void QuitWithFatalError ( NSString *message)
 
 - (BOOL)loadROM:(NSURL *)fileURL
 {
-	running = false;
-	frzselecting = false;
-
-	while (!Settings.StopEmulation)
-	{
-		usleep(Settings.FrameTime);
-	}
+    [self stopEmulationThread];
+    ++_romGeneration;
 
     if ( SNES9X_OpenCart(fileURL) )
     {
@@ -3359,13 +3533,8 @@ void QuitWithFatalError ( NSString *message)
 		return NO;
 	}
 
-	running = false;
-	frzselecting = false;
-
-	while (!Settings.StopEmulation)
-	{
-		usleep(Settings.FrameTime);
-	}
+    [self stopEmulationThread];
+    ++_romGeneration;
 
 	if (SNES9X_OpenMultiCart(fileURLs.firstObject, fileURLs.lastObject))
 	{
@@ -3488,6 +3657,26 @@ void QuitWithFatalError ( NSString *message)
 	memcpy(buffer, Memory.RAM, length);
 }
 
+- (void)readRAMWithCompletion:(void (^)(NSData *ram))completion
+{
+    [self beginUserInterfacePause:^
+    {
+        NSData *ram = [NSData dataWithBytes:Memory.RAM length:0x20000];
+        [self endUserInterfacePause];
+        completion(ram);
+    }];
+}
+
+- (void)readWatchPointsWithCompletion:(void (^)(NSArray<S9xWatchPoint *> *watchPoints))completion
+{
+    [self beginUserInterfacePause:^
+    {
+        NSArray<S9xWatchPoint *> *watchPoints = [self getWatchPoints];
+        [self endUserInterfacePause];
+        completion(watchPoints);
+    }];
+}
+
 - (NSArray<S9xWatchPoint *> *)getWatchPoints
 {
 	NSMutableArray<S9xWatchPoint *> *watchPoints = [NSMutableArray new];
@@ -3509,6 +3698,15 @@ void QuitWithFatalError ( NSString *message)
 }
 
 - (void)setWatchPoints:(NSArray<S9xWatchPoint *> *)watchPoints
+{
+    NSArray<S9xWatchPoint *> *snapshot = [watchPoints copy];
+    [self performForROMGeneration:self.romGeneration action:^
+    {
+        [self applyWatchPoints:snapshot];
+    }];
+}
+
+- (void)applyWatchPoints:(NSArray<S9xWatchPoint *> *)watchPoints
 {
 	memset(watches, 0, sizeof(watches));
 	NSUInteger i = 0;

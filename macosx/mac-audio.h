@@ -28,6 +28,8 @@ void InitMacSound (void);
 void DeinitMacSound (void);
 void MacStartSound (void);
 void MacStopSound (void);
+bool MacIsAudioMuted (void);
+void MacSetAudioMuted (bool muted);
 void ConfigureSoundEffects (void);
 
 #endif

@@ -27,8 +27,9 @@
 NSWindowFrameAutosaveName const kMainWindowIdentifier = @"s9xMainWindow";
 NSWindowFrameAutosaveName const kCheatsWindowIdentifier = @"s9xCheatsWindow";
 NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderWindow";
+static NSString *const kRecentGamePaths = @"RecentGamePaths";
 
-@interface AppDelegate () <S9xCheatFinderDelegate>
+@interface AppDelegate () <S9xCheatFinderDelegate, NSMenuDelegate>
 @end
 
 @implementation AppDelegate
@@ -361,6 +362,12 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 {
     const NSInteger maxRecents = 20;
 
+    if ([NSUserDefaults.standardUserDefaults objectForKey:kRecentGamePaths] == nil)
+    {
+        for (NSURL *url in NSDocumentController.sharedDocumentController.recentDocumentURLs.reverseObjectEnumerator)
+            [self noteRecentGame:url];
+    }
+
     for (NSInteger i = maxRecents - 1; i >= 0; --i)
     {
         NSString *key = [NSString stringWithFormat:@"RecentItem_%02tu", i];
@@ -368,7 +375,7 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 
         if (recentItem != nil)
         {
-            [NSDocumentController.sharedDocumentController noteNewRecentDocumentURL:[NSURL fileURLWithPath:recentItem]];
+            [self noteRecentGame:[NSURL fileURLWithPath:recentItem]];
             [NSUserDefaults.standardUserDefaults removeObjectForKey:key];
         }
     }
@@ -468,11 +475,64 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
     if ([self.s9xEngine loadROM:url])
     {
         [self resetWindow];
-        [NSDocumentController.sharedDocumentController noteNewRecentDocumentURL:url];
+        [self noteRecentGame:url];
         return YES;
     }
 
     return NO;
+}
+
+- (void)noteRecentGame:(NSURL *)url
+{
+    NSString *path = url.URLByStandardizingPath.path;
+    NSMutableArray<NSString *> *paths = [[NSUserDefaults.standardUserDefaults stringArrayForKey:kRecentGamePaths] mutableCopy];
+    if (paths == nil)
+        paths = [NSMutableArray new];
+    [paths removeObject:path];
+    [paths insertObject:path atIndex:0];
+    if (paths.count > 20)
+        [paths removeObjectsInRange:NSMakeRange(20, paths.count - 20)];
+    [NSUserDefaults.standardUserDefaults setObject:paths forKey:kRecentGamePaths];
+    [NSDocumentController.sharedDocumentController noteNewRecentDocumentURL:url];
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu
+{
+    [menu removeAllItems];
+    NSArray<NSString *> *paths = [NSUserDefaults.standardUserDefaults stringArrayForKey:kRecentGamePaths];
+    for (NSString *path in paths)
+    {
+        NSURL *url = [NSURL fileURLWithPath:path];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:url.lastPathComponent action:@selector(openRecentGame:) keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = url;
+        item.toolTip = url.path;
+        [menu addItem:item];
+    }
+
+    if (paths.count > 0)
+        [menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *clear = [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Clear Menu", nil) action:@selector(clearRecentGames:) keyEquivalent:@""];
+    clear.target = self;
+    [menu addItem:clear];
+}
+
+- (IBAction)openRecentGame:(NSMenuItem *)sender
+{
+    NSURL *url = sender.representedObject;
+    if (![self openURL:url])
+    {
+        [NSApp presentError:[NSError errorWithDomain:@"com.snes9x" code:3 userInfo:@{
+            NSLocalizedDescriptionKey: NSLocalizedString(@"The recent game could not be opened.", nil),
+            NSURLErrorKey: url
+        }]];
+    }
+}
+
+- (IBAction)clearRecentGames:(id)sender
+{
+    [NSUserDefaults.standardUserDefaults setObject:@[] forKey:kRecentGamePaths];
+    [NSDocumentController.sharedDocumentController clearRecentDocuments:sender];
 }
 
 - (IBAction)openMultiple:(id)sender
@@ -504,6 +564,14 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 
 - (void)resetWindow
 {
+    [self performWithEmulationPaused:^
+    {
+        [self configureGameWindow];
+    }];
+}
+
+- (void)configureGameWindow
+{
     [self.s9xEngine recreateS9xView];
 
     NSWindow *gameWindow = self.gameWindow;
@@ -526,8 +594,20 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
 {
 	SEL action = menuItem.action;
-	if (action == @selector(resume:) || action == @selector(softwareReset:) || action == @selector(hardwareReset:)) {
-		return [self.s9xEngine isRunning] && [self.s9xEngine isPaused];
+    if (action == @selector(clearRecentGames:))
+        return [NSUserDefaults.standardUserDefaults stringArrayForKey:kRecentGamePaths].count > 0;
+    if (action == @selector(resume:))
+    {
+        menuItem.title = [self.s9xEngine isPaused] ? NSLocalizedString(@"Resume", nil) : NSLocalizedString(@"Pause", nil);
+        return [self.s9xEngine isRunning] && ![self.s9xEngine isPausedForUserInterface];
+    }
+    if (action == @selector(toggleAudioMute:))
+    {
+        menuItem.state = self.s9xEngine.isAudioMuted ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+	if (action == @selector(softwareReset:) || action == @selector(hardwareReset:)) {
+		return [self.s9xEngine isRunning];
 	}
 	else if (action == @selector(updateDeviceSetting:)) {
 		menuItem.state = (self.deviceSetting == (S9xDeviceSetting)menuItem.tag) ? NSOnState : NSOffState;
@@ -542,9 +622,14 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
         {
             menuItem.title = NSLocalizedString(@"Enable Cheats", nil);
         }
+        return [self.s9xEngine isRunning];
+    }
+    else if (action == @selector(openCheatsWindow:) || action == @selector(openCheatFinderWindow:))
+    {
+        return [self.s9xEngine isRunning];
     }
 
-    return !self.isRunningEmulation;
+    return YES;
 }
 
 @dynamic isRunningEmulation;
@@ -561,11 +646,21 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 
 - (IBAction)openPreferencesWindow:(id)sender
 {
+    [self showPreferencesWindow];
+}
+
+- (void)performWithEmulationPaused:(dispatch_block_t)action
+{
+    [self.s9xEngine performWithEmulationPaused:action];
+}
+
+- (void)showPreferencesWindow
+{
     if ( self.preferencesWindowController == nil )
     {
 		self.preferencesWindowController = [[S9xPreferencesWindowController alloc] initWithWindowNibName:@"S9xPreferencesWindowController"];
 	}
-	
+
 	[self.preferencesWindowController showWindow:nil];
 	[self.preferencesWindowController.window makeKeyAndOrderFront:nil];
 	[self.preferencesWindowController.window makeKeyWindow];
@@ -573,26 +668,43 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 
 - (void)setVideoMode:(int)videoMode
 {
-    [self.s9xEngine setVideoMode:videoMode];
+    [self performWithEmulationPaused:^
+    {
+        [self.s9xEngine setVideoMode:videoMode];
+    }];
     [NSUserDefaults.standardUserDefaults setObject:@(videoMode) forKey:kVideoModePref];
     [NSUserDefaults.standardUserDefaults synchronize];
 }
 
 - (void)setMacFrameSkip:(int)_macFrameSkip
 {
-    [self.s9xEngine setMacFrameSkip:_macFrameSkip];
+    [self performWithEmulationPaused:^
+    {
+        [self.s9xEngine setMacFrameSkip:_macFrameSkip];
+    }];
     [NSUserDefaults.standardUserDefaults setObject:@(_macFrameSkip) forKey:kMacFrameSkipPref];
     [NSUserDefaults.standardUserDefaults synchronize];
 }
 
 - (void)setShowFPS:(BOOL)showFPS
 {
-    [self.s9xEngine setShowFPS:showFPS];
+    [self performWithEmulationPaused:^
+    {
+        [self.s9xEngine setShowFPS:showFPS];
+    }];
     [NSUserDefaults.standardUserDefaults setObject:@(showFPS) forKey:kShowFPSPref];
     [NSUserDefaults.standardUserDefaults synchronize];
 }
 
 - (void)applyEmulationSettings
+{
+    [self performWithEmulationPaused:^
+    {
+        [self applyEmulationSettingsWhilePaused];
+    }];
+}
+
+- (void)applyEmulationSettingsWhilePaused
 {
     S9xEngine *engine = self.s9xEngine;
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -609,22 +721,39 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 
 - (IBAction)resume:(id)sender
 {
-    [self.s9xEngine resume];
+    [self.s9xEngine togglePause];
+}
+
+- (IBAction)toggleAudioMute:(id)sender
+{
+    self.s9xEngine.audioMuted = !self.s9xEngine.isAudioMuted;
 }
 
 - (IBAction)softwareReset:(id)sender
 {
-	[self.s9xEngine softwareReset];
+    [self performWithEmulationPaused:^
+    {
+        if ([self.s9xEngine isRunning])
+            [self.s9xEngine softwareReset];
+    }];
 }
 
 - (IBAction)hardwareReset:(id)sender
 {
-	[self.s9xEngine hardwareReset];
+    [self performWithEmulationPaused:^
+    {
+        if ([self.s9xEngine isRunning])
+            [self.s9xEngine hardwareReset];
+    }];
 }
 
 - (IBAction)updateDeviceSetting:(id)sender
 {
-	self.deviceSetting = (S9xDeviceSetting)[sender tag];
+    S9xDeviceSetting setting = (S9xDeviceSetting)[sender tag];
+    [self performWithEmulationPaused:^
+    {
+        self.deviceSetting = setting;
+    }];
 }
 
 - (void)setDeviceSetting:(S9xDeviceSetting)deviceSetting
@@ -651,9 +780,17 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 
 - (IBAction)openCheatsWindow:(id)sender
 {
+    if ([self.s9xEngine isRunning])
+        [self showCheatsWindow];
+}
+
+- (void)showCheatsWindow
+{
     if (self.cheatsWindowController == nil)
     {
-        NSWindow *window = [NSWindow windowWithContentViewController:[[S9xCheatsViewController alloc] initWithNibName:@"S9xCheatsViewController" bundle:nil]];
+        S9xCheatsViewController *vc = [[S9xCheatsViewController alloc] initWithNibName:@"S9xCheatsViewController" bundle:nil];
+        vc.engine = self.s9xEngine;
+        NSWindow *window = [NSWindow windowWithContentViewController:vc];
         self.cheatsWindowController = [[NSWindowController alloc] initWithWindow:window];
 
         window = self.cheatsWindowController.window;
@@ -675,11 +812,23 @@ NSWindowFrameAutosaveName const kCheatFinderWindowIdentifier = @"s9xCheatFinderW
 
 - (IBAction)toggleCheats:(id)sender
 {
-    self.s9xEngine.cheatsEnabled = !self.s9xEngine.cheatsEnabled;
-    [NSUserDefaults.standardUserDefaults setBool:self.s9xEngine.cheatsEnabled forKey:kEnableCheatsPref];
+    [self performWithEmulationPaused:^
+    {
+        if ([self.s9xEngine isRunning])
+        {
+            self.s9xEngine.cheatsEnabled = !self.s9xEngine.cheatsEnabled;
+            [NSUserDefaults.standardUserDefaults setBool:self.s9xEngine.cheatsEnabled forKey:kEnableCheatsPref];
+        }
+    }];
 }
 
 - (IBAction)openCheatFinderWindow:(id)sender
+{
+    if ([self.s9xEngine isRunning])
+        [self showCheatFinderWindow];
+}
+
+- (void)showCheatFinderWindow
 {
     if ( self.cheatFinderWindowController == nil )
     {

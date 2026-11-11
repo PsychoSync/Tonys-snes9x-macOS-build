@@ -29,16 +29,20 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, weak) IBOutlet NSButton *saveButton;
 
 @property (nonatomic, strong) S9xCheatItem *cheatItem;
+@property (nonatomic, strong) S9xEngine *engine;
+@property (nonatomic) NSUInteger romGeneration;
 @property (nonatomic, copy) void (^saveBlock)(void);
 @end
 
 @implementation S9xCheatEditViewController
 
-- (instancetype)initWithCheatItem:(nullable S9xCheatItem *)cheatItem saveCallback:(void (^)(void))saveCallback
+- (instancetype)initWithEngine:(S9xEngine *)engine cheatItem:(nullable S9xCheatItem *)cheatItem saveCallback:(void (^)(void))saveCallback
 {
 	if (self = [super initWithNibName:@"S9xCheatEditViewController" bundle:nil])
 	{
 		_cheatItem = cheatItem;
+        _engine = engine;
+        _romGeneration = cheatItem != nil ? cheatItem.romGeneration : engine.romGeneration;
 		_saveBlock = saveCallback;
 	}
 
@@ -113,27 +117,32 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (IBAction)save:(id)sender
 {
-	if ( self.cheatItem != nil )
-	{
-		self.cheatItem.address = self.addressField.objectValue;
-		self.cheatItem.value = self.valueField.objectValue;
-		self.cheatItem.cheatDescription = self.descriptionField.stringValue;
-	}
-	else
-	{
-		if (self.codeField.stringValue.length > 0)
-		{
-			CreateCheatFromCode(self.codeField.stringValue, self.descriptionField.stringValue);
-		}
-		else
-		{
-			CreateCheatFromAddress(self.addressField.objectValue, self.valueField.objectValue, self.descriptionField.stringValue);
-		}
-	}
+    NSNumber *address = self.addressField.objectValue;
+    NSNumber *value = self.valueField.objectValue;
+    NSString *description = self.descriptionField.stringValue;
+    NSString *code = self.codeField.stringValue;
+    self.saveButton.enabled = NO;
+    [self.engine performForROMGeneration:self.romGeneration action:^
+    {
+        if (self.cheatItem != nil)
+        {
+            self.cheatItem.address = address;
+            self.cheatItem.value = value;
+            self.cheatItem.cheatDescription = description;
+        }
+        else if (code.length > 0)
+        {
+            CreateCheatFromCode(code, description);
+        }
+        else
+        {
+            CreateCheatFromAddress(address, value, description);
+        }
 
-	[self dismissViewController:self];
+        [self dismissViewController:self];
 
-	self.saveBlock();
+        self.saveBlock();
+    }];
 }
 
 - (IBAction)cancelOperation:(nullable id)sender
